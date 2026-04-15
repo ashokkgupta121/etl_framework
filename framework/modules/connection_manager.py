@@ -91,6 +91,8 @@ class ConnectionManager:
             password_secret = connection_row.password_kv_secret,
             driver_class    = connection_row.jdbc_driver_class,
         )
+        
+        print(props)
 
         # Merge extra options from config JSON
         if connection_row.extra_options_json:
@@ -107,6 +109,7 @@ class ConnectionManager:
         # Determine if query is a raw SQL expression or a table name
         is_query = query_or_table.strip().upper().startswith("SELECT")
         dbtable  = f"({query_or_table}) AS etl_src" if is_query else query_or_table
+        print(jdbc_url)
 
         reader = self._spark.read.format("jdbc").option("url", jdbc_url).option("dbtable", dbtable)
 

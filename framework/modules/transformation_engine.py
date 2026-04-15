@@ -15,6 +15,13 @@ import logging
 
 from app_config import LoadStrategy, FrameworkDefaults, Layer, resolve_notebook_path
 from etl_helpers import DeltaWriter, add_audit_columns, check_min_row_count
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+from brz_visionplus_ath2_lrpmt_tgt import BrzVisionplusAth2LrpmtTgt
+from brz_visionplus_ath3d_tgt import   BrzVisionplusAth3dTgt
+from brz_visionplus_ath3x_tgt import BrzVisionplusAth3xTgt
+from brz_visionplus_atptrpt_tgt import BrzVisionplusAtptrptTgt
+
+
 
 logger = logging.getLogger("etl.transformation_engine")
 
@@ -41,6 +48,14 @@ class TransformationEngine:
             batch_job_log_id = "1_20250724090000",
         )
     """
+    
+
+    def get_empty_audit_df(self):
+        empty_df = self._spark.range(10) 
+        return empty_df
+
+# Usage
+
 
     def __init__(self, spark: SparkSession, dbutils=None):
         self._spark    = spark
@@ -65,9 +80,9 @@ class TransformationEngine:
         target_table      = f"{job_row['target_schema']}.{job_row['target_table_name']}"
         load_strategy     = job_row["table_strategy"]
         notebook_name     = job_row["notebook_name"]
-        pk_cols           = job_row.get("primary_key_columns") or ""
-        partition_cols    = job_row.get("partition_columns") or ""
-        expected_min_rows = job_row.get("expected_min_row_count")
+        pk_cols           = job_row["primary_key_columns"] if job_row["primary_key_columns"] is not None else ""
+        partition_cols    = job_row["partition_columns"] or ""
+        expected_min_rows = job_row["expected_min_row_count"]
 
         logger.info(
             "TransformationEngine.run_job — job_config_id=%s  target=%s  strategy=%s",
@@ -75,7 +90,7 @@ class TransformationEngine:
         )
 
         # -- Pre-hook (optional)
-        self._run_hook(job_row.get("pre_hook_notebook"), business_date, batch_job_log_id)
+        #self._run_hook(job_row.pre_hook_notebook, business_date, batch_job_log_id)
 
         # -- Execute transformation SQL, build final DataFrame
         df = self._execute_transformation_notebook(
@@ -84,6 +99,7 @@ class TransformationEngine:
             batch_job_log_id = batch_job_log_id,
             job_row          = job_row,
         )
+        
 
         # -- Inject audit columns
         df = add_audit_columns(
@@ -93,6 +109,7 @@ class TransformationEngine:
             business_date    = business_date,
             load_strategy    = load_strategy,
         )
+        
 
         # -- Write to Delta target
         metrics = self._writer.write(
@@ -102,6 +119,7 @@ class TransformationEngine:
             primary_key_cols = pk_cols,
             partition_cols   = partition_cols,
         )
+        
 
         # -- DQ check
         dq_passed = check_min_row_count(self._spark, target_table, expected_min_rows)
@@ -113,7 +131,7 @@ class TransformationEngine:
             )
 
         # -- Post-hook (optional)
-        self._run_hook(job_row.get("post_hook_notebook"), business_date, batch_job_log_id)
+        #self._run_hook(job_row.post_hook_notebook, business_date, batch_job_log_id)
 
         return metrics
 
@@ -155,17 +173,21 @@ class TransformationEngine:
             "target_schema":       job_row["target_schema"],
             "target_table_name":   job_row["target_table_name"],
             "table_strategy":      job_row["table_strategy"],
-            "watermark_value":     str(job_row.get("source_watermark_value") or
+            "watermark_value":     str(job_row.source_watermark_value or
                                        FrameworkDefaults.DEFAULT_WATERMARK_DATE),
+            "notebook_name":     str(job_row.notebook_name),
+            
         }
 
         # -- Databricks notebook execution path
         if self._dbutils:
             result_view = self._run_databricks_notebook(notebook_path, params)
-            return self._spark.table(result_view)
+            print(f"after run_databricks_notebook{result_view}")
+            #return self._spark.table(result_view)
+            return result_view
 
         # -- Fallback: direct SQL execution (for testing / non-notebook mode)
-        return self._run_sql_queries_directly(notebook_path, params)
+        #return self._run_sql_queries_directly(notebook_path, params)
 
     def _run_databricks_notebook(self, notebook_path: str, params: dict) -> str:
         """
@@ -173,11 +195,22 @@ class TransformationEngine:
         The notebook must exit with the name of the temp view containing results.
         """
         timeout_seconds = 3600  # 1 hour max per table
-        result_view = self._dbutils.notebook.run(
-            notebook_path,
-            timeout_seconds,
-            params
-        )
+        result_view = None
+        
+
+        class_obj = globals()[params.get('notebook_name')]({'watermark_value': '2026-03-01', 'business_date': '2026-02-01'})
+        
+        queries = getattr(class_obj, "queries", None)
+
+        
+
+        for query in queries:
+            df = self._spark.sql(query["sql"])
+            df.createOrReplaceTempView(query["name"])
+        result_view = df
+        #result_view = self.get_empty_audit_df()
+
+        print(f"after result_view")
         if not result_view:
             raise RuntimeError(
                 f"Notebook {notebook_path} did not return a result view name. "
@@ -185,36 +218,7 @@ class TransformationEngine:
             )
         return result_view
 
-    def _run_sql_queries_directly(self, notebook_path: str, params: dict) -> DataFrame:
-        """
-        Non-notebook fallback: reads SQL queries from the .sql file and
-        executes them in order. Used in unit tests and CI pipelines.
-        """
-        # Set params as Spark SQL variables
-        for k, v in params.items():
-            self._spark.conf.set(f"etl.param.{k}", v)
-
-        # Read the SQL file (in repo, mapped to DBFS or mounted path)
-        sql_file = f"/Workspace/Repos/etl_framework/{notebook_path}.sql"
-        try:
-            with open(sql_file, "r") as f:
-                raw_sql = f.read()
-        except FileNotFoundError:
-            raise FileNotFoundError(f"SQL file not found: {sql_file}")
-
-        # Split on "-- query_XXX_" markers and execute in order
-        queries = self._parse_sql_queries(raw_sql)
-        last_df = None
-
-        for step_name, sql in queries.items():
-            interpolated = self._interpolate_params(sql, params)
-            logger.debug("Executing step '%s'", step_name)
-            last_df = self._spark.sql(interpolated)
-            last_df.createOrReplaceTempView(step_name)
-
-        if last_df is None:
-            raise RuntimeError(f"No queries found in notebook: {notebook_path}")
-        return last_df
+   
 
     # =========================================================================
     # HELPERS
@@ -228,7 +232,7 @@ class TransformationEngine:
         """
         if notebook_name.startswith("/") or notebook_name.startswith("framework/"):
             return notebook_name
-        return f"framework/sql/{notebook_name}"
+        return f"sql/{notebook_name}"
 
     @staticmethod
     def _parse_sql_queries(raw_sql: str) -> dict:

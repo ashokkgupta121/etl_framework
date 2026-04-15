@@ -21,6 +21,7 @@ from audit_manager import AuditManager
 from etl_logger import ETLLogger
 from transformation_engine import TransformationEngine
 
+
 logger = logging.getLogger("etl.batch_orchestrator")
 
 
@@ -99,8 +100,9 @@ class BatchOrchestrator:
         # ── Step 3: fetch config ──────────────────────────────────────────────
         batch_cfg   = self._audit_mgr.get_batch_config(batch_job_config_id)
         all_jobs    = self._audit_mgr.get_active_jobs_for_batch(batch_job_config_id)
-        max_workers = batch_cfg.get("max_parallel_jobs") or FrameworkDefaults.MAX_PARALLEL_JOBS
-
+        
+        max_workers = batch_cfg.max_parallel_jobs
+        
         if not all_jobs:
             logger.warning("No active jobs found for batch_job_config_id=%s", batch_job_config_id)
             return JobStatus.SKIPPED
@@ -148,7 +150,8 @@ class BatchOrchestrator:
             jobs_skipped     = counters["skipped"],
         )
 
-        final_status = JobStatus.FAILED if counters["failed"] > 0 else JobStatus.COMPLETED
+        final_status = JobStatus.FAILED if counters["failed"] > 0 or counters["skipped"] > 0 else JobStatus.COMPLETED
+        
         logger.info(
             "=== BATCH END === status=%s  completed=%s  failed=%s  skipped=%s",
             final_status, counters["completed"], counters["failed"], counters["skipped"]
@@ -208,9 +211,9 @@ class BatchOrchestrator:
         """
         job_config_id = job_row["job_config_id"]
         target_table  = f"{job_row['target_schema']}.{job_row['target_table_name']}"
-        notebook_path = job_row.get("notebook_name") or ""
-        audit_log_id  = self._audit_mgr.generate_job_audit_log_id()
-
+        notebook_path = job_row.notebook_name or ""
+        audit_log_id  = self._audit_mgr.generate_job_audit_log_id(job_config_id)
+        print(f"start_job start for {job_config_id}")
         # -- Insert RUNNING log record
         self._logger.start_job(
             job_audit_log_id    = audit_log_id,
@@ -221,7 +224,7 @@ class BatchOrchestrator:
             business_date       = business_date,
             notebook_path       = notebook_path,
         )
-
+        
         # -- Idempotency check
         if self._audit_mgr.is_job_already_completed(job_config_id, business_date):
             self._logger.skip_job(
@@ -238,15 +241,17 @@ class BatchOrchestrator:
 
         # -- Run transformation
         try:
+            
             metrics = self._transform_engine.run_job(
                 job_row          = job_row,
                 business_date    = business_date,
                 batch_job_log_id = batch_log_id,
             )
+            
 
             # Update watermark for incremental loads
-            if job_row["table_strategy"] in ("INC",) and metrics.get("watermark_value_new"):
-                self._audit_mgr.update_watermark(job_config_id, metrics["watermark_value_new"])
+            # if job_row["table_strategy"] in ("INC",) and metrics.get("watermark_value_new"):
+            #     self._audit_mgr.update_watermark(job_config_id, metrics["watermark_value_new"])
 
             self._logger.complete_job(audit_log_id, **metrics)
             logger.info("Job COMPLETED — %s", target_table)

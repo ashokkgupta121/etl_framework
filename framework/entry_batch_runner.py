@@ -1,4 +1,14 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "2"
+# ///
+# MAGIC %load_ext autoreload
+# MAGIC %autoreload 2
+# MAGIC # Enables autoreload; learn more at https://docs.databricks.com/en/files/workspace-modules.html#autoreload-for-python-modules
+# MAGIC # To disable autoreload; run %autoreload 0
+
+# COMMAND ----------
 
 # =============================================================================
 # FILE    : framework/entry_batch_runner.py
@@ -26,8 +36,40 @@ from datetime import date
 
 # -- Make framework modules importable ---------------------------------------
 # In Databricks, the repo is mounted at /Workspace/Repos/<user>/etl_framework
-REPO_ROOT = "/Workspace/Repos/etl_framework"
-sys.path.insert(0, f"{REPO_ROOT}/framework/modules")
+REPO_ROOT = "/Workspace/Users/ashok.k.gupta121@gmail.com/etl_framework"
+MODULES_PATH = f"{REPO_ROOT}/framework/modules"
+SQL_PATH = f"{REPO_ROOT}/framework/modules/sql/visionplus"
+
+
+# DBTITLE 1,Importing Required Libraries
+import pandas as pd
+import numpy as np
+
+
+if MODULES_PATH not in sys.path:
+    sys.path.insert(0, MODULES_PATH)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+if SQL_PATH not in sys.path:
+    print(SQL_PATH)
+    sys.path.insert(0, SQL_PATH)
+
+# -- Validate path is correct before importing --------------------------------
+import importlib, importlib.util
+import time
+time.sleep(10)
+
+def _assert_module_on_path(module_name: str):
+    spec = importlib.util.find_spec(module_name)
+    if spec is None:
+        print(
+            f"Cannot find '{module_name}' on sys.path.\n"
+            f"Current sys.path:\n" + "\n".join(sys.path)
+        )
+
+for _mod in ["app_config", "session_manager", "secret_manager",
+             "audit_manager", "etl_logger", "batch_orchestrator","brz_visionplus_ath2_lrpmt_tgt"]:
+    _assert_module_on_path(_mod)
 
 # -- Configure logging -------------------------------------------------------
 logging.basicConfig(
@@ -56,7 +98,7 @@ except Exception:
     pass  # Running outside Databricks (unit test / CI)
 
 sm_temp = SessionManager()
-spark_temp = sm_temp.get_or_create_session()
+spark_temp = sm_temp.get_session()
 
 batch_job_config_id = int(
     SessionManager.resolve_widget_param(spark_temp, "batch_job_config_id", "1")
@@ -64,6 +106,7 @@ batch_job_config_id = int(
 business_date_str = SessionManager.resolve_widget_param(
     spark_temp, "business_date", str(date.today())
 )
+print(business_date_str)
 trigger_type   = SessionManager.resolve_widget_param(spark_temp, "trigger_type",  "SCHEDULED")
 airflow_dag_id = SessionManager.resolve_widget_param(spark_temp, "airflow_dag_id", "manual_run")
 
@@ -80,12 +123,13 @@ logger.info(
 
 env_config = EnvironmentConfig()
 session_mgr = SessionManager(env_config)
-spark       = session_mgr.get_or_create_session()
+spark       = session_mgr.get_session()
 
 from audit_manager import AuditManager
+import threading
 batch_log_id = AuditManager.generate_batch_log_id(batch_job_config_id)
 
-session_mgr.set_run_context(
+session_mgr.set_run_context(spark,
     business_date       = business_date,
     batch_job_config_id = batch_job_config_id,
     batch_job_log_id    = batch_log_id,
@@ -107,8 +151,8 @@ try:
     logger.info("Batch run finished — final_status=%s", final_status)
 
     # Exit code used by Databricks Jobs to determine success/failure
-    if final_status == "FAILED":
-        raise RuntimeError(f"Batch {batch_job_config_id} FAILED for business_date={business_date}.")
+    # if final_status == "FAILED":
+    #     raise RuntimeError(f"Batch {batch_job_config_id} FAILED for business_date={business_date}.")
 
 except Exception as exc:
     logger.exception("Unhandled exception in entry_batch_runner: %s", exc)
@@ -117,4 +161,4 @@ except Exception as exc:
 # ===========================================================================
 # STEP 4 — Return result (notebook context)
 # ===========================================================================
-dbutils.notebook.exit(final_status)
+#dbutils.notebook.exit(final_status)

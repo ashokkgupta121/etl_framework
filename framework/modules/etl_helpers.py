@@ -68,14 +68,16 @@ class DeltaWriter:
         schema_evolution: bool,
     ) -> dict:
         """Overwrites the entire target table (FULL load)."""
+        print("before source count")
         source_count = df.count()
+        print(f"target table is {target_table}")
         writer = df.write.format("delta").mode("overwrite")
         if schema_evolution:
             writer = writer.option("overwriteSchema", "true")
         if partition_cols:
             writer = writer.partitionBy(*partition_cols)
-        writer.saveAsTable(target_table)
-
+        writer.saveAsTable(target_table,inferSchema=True)
+        
         return {
             "source_row_count":       source_count,
             "target_rows_inserted":   source_count,

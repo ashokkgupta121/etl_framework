@@ -11,10 +11,14 @@ from pyspark.sql import functions as F
 from datetime import datetime, date
 from typing import Optional
 import logging
+import time
+import random
+from delta.exceptions import ConcurrentAppendException
 
 from app_config import MetadataTable, JobStatus
 
 logger = logging.getLogger("etl.etl_logger")
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, TimestampType,LongType
 
 
 class ETLLogger:
@@ -57,24 +61,50 @@ class ETLLogger:
     ) -> None:
         """Inserts a RUNNING record into batch_job_log at the start of a batch."""
         now = datetime.utcnow()
+        
+
+# 1. Define the schema explicitly
+        log_schema = StructType([
+        StructField("batch_job_log_id", StringType(), True),
+        StructField("batch_job_config_id", IntegerType(), True),
+        StructField("business_date", StringType(), True),
+        StructField("batch_start_date", TimestampType(), True),
+        StructField("batch_end_date", TimestampType(), True), # Spark now knows this is a Timestamp
+        StructField("batch_status", StringType(), True),
+        StructField("batch_airflow_dag_id", StringType(), True),
+        StructField("skip_reason", StringType(), True),
+        StructField("triggered_by", StringType(), True),
+        StructField("databricks_run_id", StringType(), True),
+        StructField("total_jobs", IntegerType(), True),
+        StructField("jobs_completed", IntegerType(), True),
+        StructField("jobs_failed", IntegerType(), True),
+        StructField("jobs_skipped", IntegerType(), True),
+        StructField("error_message", StringType(), True),    # Spark now knows this is a String
+        StructField("created_dt", TimestampType(), True),
+        StructField("updated_dt", TimestampType(), True)
+        ])
         data = [{
             "batch_job_log_id":     batch_job_log_id,
             "batch_job_config_id":  batch_job_config_id,
-            "business_date":        str(business_date),
-            "batch_start_date":     now,
+            "business_date":        (business_date),
+            "batch_start_date":     (now),
             "batch_end_date":       None,
-            "batch_status":         JobStatus.RUNNING,
+            "batch_status":         "Running",
             "batch_airflow_dag_id": batch_airflow_dag_id,
+            "skip_reason":          None,
             "triggered_by":         trigger_type,
+            "databricks_run_id":    batch_job_log_id,   
             "total_jobs":           0,
             "jobs_completed":       0,
             "jobs_failed":          0,
             "jobs_skipped":         0,
             "error_message":        None,
-            "created_dt":           now,
-            "updated_dt":           now,
+            "created_dt":           (now),
+            "updated_dt":           (now),
         }]
-        df = self._spark.createDataFrame(data)
+       
+        df = self._spark.createDataFrame(data,schema=log_schema)
+        
         self._merge_batch_log(df, batch_job_log_id)
         logger.info("Batch STARTED — log_id=%s  business_date=%s", batch_job_log_id, business_date)
 
@@ -137,6 +167,32 @@ class ETLLogger:
     ) -> int:
         """Inserts a RUNNING record into job_audit_log."""
         now = datetime.utcnow()
+        job_audit_schema = StructType([
+            StructField("job_audit_log_id", StringType(), True),           # Unique ID for the job run
+            StructField("business_date", StringType(), True),            # ISO Format String (e.g., 2025-08-02)
+            StructField("job_config_id", IntegerType(), True),           # Reference to job_config table
+            StructField("batch_job_config_id", IntegerType(), True),     # Reference to batch_job_config
+            StructField("batch_airflow_dag_id", StringType(), True),     # Correlation ID from Airflow
+            StructField("batch_job_log_id", StringType(), True),           # Parent Batch ID
+            StructField("job_status", StringType(), True),               # Running/Completed/Failed/Skipped
+            StructField("skip_reason", StringType(), True),              # Log why a job was bypassed
+            StructField("job_start_date", TimestampType(), True),        # Start timestamp
+            StructField("job_end_date", TimestampType(), True),          # End timestamp
+            StructField("duration_seconds", IntegerType(), True),        # Calculated run time
+            StructField("source_row_count", LongType(), True),           # Rows read from source
+            StructField("target_rows_inserted", LongType(), True),       # New records added
+            StructField("target_rows_updated", LongType(), True),        # Records updated (UPSERT)
+            StructField("target_rows_deleted", LongType(), True),        # Records removed
+            StructField("target_total_row_count", LongType(), True),     # Final count of target table
+            StructField("watermark_value_used", StringType(), True),     # Starting watermark (for Incremental)
+            StructField("watermark_value_new", StringType(), True),      # Ending watermark
+            StructField("error_desc", StringType(), True),               # Exception traceback if failed
+            StructField("notebook_path", StringType(), True),            # Audit trail for the logic executed
+            StructField("retry_attempt", IntegerType(), True),           # Track if this was a rerun
+            StructField("databricks_task_run_id", StringType(), True),
+            StructField("created_dt", TimestampType(), True),            # Record creation timestamp
+            StructField("updated_dt", TimestampType(), True)             # Record last update timestamp
+        ])
         data = [{
             "job_audit_log_id":      job_audit_log_id,
             "business_date":         str(business_date),
@@ -159,11 +215,16 @@ class ETLLogger:
             "error_desc":            None,
             "notebook_path":         notebook_path,
             "retry_attempt":         retry_attempt,
+            "databricks_task_run_id" : None,
             "created_dt":            now,
             "updated_dt":            now,
         }]
-        df = self._spark.createDataFrame(data)
+        print("job_audit_log_id is %s" % job_audit_log_id)
+        
+        df = self._spark.createDataFrame(data,schema=job_audit_schema)
+        
         self._merge_job_log(df, job_audit_log_id)
+        
         logger.info("Job STARTED — audit_id=%s  job_config_id=%s", job_audit_log_id, job_config_id)
         return job_audit_log_id
 
@@ -176,27 +237,57 @@ class ETLLogger:
         target_rows_deleted:    int  = 0,
         target_total_row_count: int  = 0,
         watermark_value_new:    Optional[str] = None,
+        
     ) -> None:
         """Updates job_audit_log to COMPLETED with row count metrics."""
         end_time = datetime.utcnow()
-        self._spark.sql(f"""
-            MERGE INTO {MetadataTable.JOB_AUDIT_LOG} AS tgt
-            USING (
-                SELECT
-                    {job_audit_log_id}            AS job_audit_log_id,
-                    '{JobStatus.COMPLETED}'        AS job_status,
-                    current_timestamp()            AS job_end_date,
-                    {source_row_count}             AS source_row_count,
-                    {target_rows_inserted}         AS target_rows_inserted,
-                    {target_rows_updated}          AS target_rows_updated,
-                    {target_rows_deleted}          AS target_rows_deleted,
-                    {target_total_row_count}       AS target_total_row_count,
-                    {'NULL' if not watermark_value_new else f"'{watermark_value_new}'"} AS watermark_value_new,
-                    'Successful Run'               AS error_desc,
-                    current_timestamp()            AS updated_dt
-            ) AS src ON tgt.job_audit_log_id = src.job_audit_log_id
-            WHEN MATCHED THEN UPDATE SET *
-        """)
+        max_retries = 5
+        for i in range(max_retries):
+            try:
+                self._spark.sql(f"""
+                    MERGE INTO {MetadataTable.JOB_AUDIT_LOG} AS tgt
+                    USING (
+                        SELECT
+                            {job_audit_log_id}            AS job_audit_log_id,
+                            '{JobStatus.COMPLETED}'        AS job_status,
+                            current_timestamp()            AS job_end_date,
+                            {source_row_count}             AS source_row_count,
+                            {target_rows_inserted}         AS target_rows_inserted,
+                            {target_rows_updated}          AS target_rows_updated,
+                            {target_rows_deleted}          AS target_rows_deleted,
+                            {target_total_row_count}       AS target_total_row_count,
+                            {'NULL' if not watermark_value_new else f"'{watermark_value_new}'"} AS watermark_value_new,
+                            'Successful Run'               AS error_desc,
+                            current_timestamp()            AS updated_dt
+                        
+                    ) AS src ON tgt.job_audit_log_id = src.job_audit_log_id
+                    WHEN MATCHED THEN UPDATE SET tgt.source_row_count = src.source_row_count,
+                                                tgt.job_end_date = src.job_end_date,
+                                                tgt.job_status = src.job_status,
+                                                tgt.target_rows_inserted = src.target_rows_inserted,
+                                                tgt.target_rows_updated = src.target_rows_updated,
+                                                tgt.target_rows_deleted = src.target_rows_deleted,
+                                                tgt.target_total_row_count = src.target_total_row_count,
+                                                tgt.watermark_value_new = src.watermark_value_new,
+                                                tgt.error_desc = src.error_desc,
+                                                tgt.updated_dt = src.updated_dt
+                """)
+                break 
+            except Exception as e:
+                if "ConcurrentAppendException" in str(e) and i < max_retries - 1:
+                    print(f"ConcurrentAppendException in complete_job . Retrying in {2**i}s...")
+                    time.sleep(2 ** i + random.uniform(0, 1))
+                    continue
+                else:
+                    print(f"Final error for {job_audit_log_id}: {e}")
+                    raise e
+            finally:
+            # Clean up temp view after merge completes or fails
+                try:
+                    self._spark.sql(f"DROP VIEW IF EXISTS {job_audit_log_id}")
+                except:
+                    pass
+
         logger.info("Job COMPLETED — audit_id=%s  inserted=%s  updated=%s",
                     job_audit_log_id, target_rows_inserted, target_rows_updated)
 
@@ -248,21 +339,50 @@ class ETLLogger:
 
     def _merge_batch_log(self, df, batch_job_log_id: str) -> None:
         df.createOrReplaceTempView("_batch_log_stage")
+        print("before merge")
         self._spark.sql(f"""
             MERGE INTO {MetadataTable.BATCH_JOB_LOG} AS tgt
             USING _batch_log_stage AS src
               ON tgt.batch_job_log_id = src.batch_job_log_id
             WHEN NOT MATCHED THEN INSERT *
         """)
+        print("after merge")
 
-    def _merge_job_log(self, df, job_audit_log_id: int) -> None:
-        df.createOrReplaceTempView("_job_log_stage")
-        self._spark.sql(f"""
-            MERGE INTO {MetadataTable.JOB_AUDIT_LOG} AS tgt
-            USING _job_log_stage AS src
-              ON tgt.job_audit_log_id = src.job_audit_log_id
-            WHEN NOT MATCHED THEN INSERT *
-        """)
+    def _merge_job_log(self, df, job_audit_log_id: int) -> None:  
+        
+
+        max_retries = 5
+        for i in range(max_retries):
+            print(f"attempt : {i} for merge job log for {job_audit_log_id} ")
+            temp_view_name = f"_job_log_stage_{job_audit_log_id}_{int(time.time() * 1000)}"
+            df.createOrReplaceTempView(temp_view_name)
+            try:
+                # Your MERGE or APPEND logic here
+                self._spark.sql(f"""
+                    MERGE INTO {MetadataTable.JOB_AUDIT_LOG} AS tgt
+                    USING {temp_view_name} AS src
+                    ON tgt.job_audit_log_id = src.job_audit_log_id
+                    WHEN NOT MATCHED THEN INSERT *
+                """)
+                
+                print(f"successfully inserted {job_audit_log_id} ")
+                break 
+            except Exception as e:
+                if "ConcurrentAppendException" in str(e) and i < max_retries - 1:
+                    print(f"ConcurrentAppendException in insert job log. Retrying in {2**i}s...")
+                    time.sleep(2 ** i + random.uniform(0, 1))
+                    continue
+                else:
+                    print(f"Final error for {job_audit_log_id}: {e}")
+                    raise e
+            finally:
+            # Clean up temp view after merge completes or fails
+                try:
+                    self._spark.sql(f"DROP VIEW IF EXISTS {temp_view_name}")
+                except:
+                    pass
+
+        
 
     def _update_batch_log(
         self,
@@ -276,27 +396,41 @@ class ETLLogger:
         jobs_skipped:     int = 0,
     ) -> None:
         safe_err = (error_message or "").replace("'", "''")
-        self._spark.sql(f"""
-            MERGE INTO {MetadataTable.BATCH_JOB_LOG} AS tgt
-            USING (
-                SELECT
-                    '{batch_job_log_id}' AS batch_job_log_id,
-                    '{status}'           AS batch_status,
-                    '{end_time}'         AS batch_end_date,
-                    {total_jobs}         AS total_jobs,
-                    {jobs_completed}     AS jobs_completed,
-                    {jobs_failed}        AS jobs_failed,
-                    {jobs_skipped}       AS jobs_skipped,
-                    '{safe_err}'         AS error_message,
-                    current_timestamp()  AS updated_dt
-            ) AS src ON tgt.batch_job_log_id = src.batch_job_log_id
-            WHEN MATCHED THEN UPDATE SET
-                tgt.batch_status   = src.batch_status,
-                tgt.batch_end_date = src.batch_end_date,
-                tgt.total_jobs     = src.total_jobs,
-                tgt.jobs_completed = src.jobs_completed,
-                tgt.jobs_failed    = src.jobs_failed,
-                tgt.jobs_skipped   = src.jobs_skipped,
-                tgt.error_message  = src.error_message,
-                tgt.updated_dt     = src.updated_dt
-        """)
+        max_retries = 5
+        for i in range(max_retries):
+            
+            try:
+                self._spark.sql(f"""
+                    MERGE INTO {MetadataTable.BATCH_JOB_LOG} AS tgt
+                    USING (
+                        SELECT
+                            '{batch_job_log_id}' AS batch_job_log_id,
+                            '{status}'           AS batch_status,
+                            '{end_time}'         AS batch_end_date,
+                            {total_jobs}         AS total_jobs,
+                            {jobs_completed}     AS jobs_completed,
+                            {jobs_failed}        AS jobs_failed,
+                            {jobs_skipped}       AS jobs_skipped,
+                            '{safe_err}'         AS error_message,
+                            current_timestamp()  AS updated_dt
+                    ) AS src ON tgt.batch_job_log_id = src.batch_job_log_id
+                    WHEN MATCHED THEN UPDATE SET
+                        tgt.batch_status   = src.batch_status,
+                        tgt.batch_end_date = src.batch_end_date,
+                        tgt.total_jobs     = src.total_jobs,
+                        tgt.jobs_completed = src.jobs_completed,
+                        tgt.jobs_failed    = src.jobs_failed,
+                        tgt.jobs_skipped   = src.jobs_skipped,
+                        tgt.error_message  = src.error_message,
+                        tgt.updated_dt     = src.updated_dt
+                """)
+                break 
+            except Exception as e:
+                if "ConcurrentAppendException" in str(e) and i < max_retries - 1:
+                    print(f"ConcurrentAppendException i update batch log. Retrying in {2**i}s...")
+                    time.sleep(2 ** i + random.uniform(0, 1))
+                    continue
+                else:
+                    print(f"Final error for {batch_job_log_id}: {e}")
+                    raise e
+            

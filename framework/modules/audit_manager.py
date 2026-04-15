@@ -64,13 +64,13 @@ class AuditManager:
         return f"{batch_job_config_id}_{ts}"
 
     @staticmethod
-    def generate_job_audit_log_id() -> int:
+    def generate_job_audit_log_id(job_config_id: int) -> str:
         """
         Generates a unique job_audit_log_id as a 14-digit int timestamp.
         Format: YYYYMMDDHHmmssSSS  (matches xlsx pattern: 20250802091944)
         """
-        ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")[:17]
-        return int(ts)
+        ts = str(job_config_id) +datetime.utcnow().strftime("%Y%m%d%H%M%S")[:14]
+        return str(ts)
 
     # =========================================================================
     # IDEMPOTENCY CHECKS
@@ -255,7 +255,7 @@ class AuditManager:
 
         Returns (True, "") if all deps met, or (False, reason_string) if not.
         """
-        depends_on_raw = job_row.get("depends_on_job_ids") or ""
+        depends_on_raw = job_row.depends_on_job_ids or ""
         if not depends_on_raw.strip():
             return True, ""
 
@@ -271,4 +271,5 @@ class AuditManager:
             reason = f"Dependency jobs not yet completed: {unmet}"
             logger.warning(reason)
             return False, reason
+        print("dependency check completed")
         return True, ""
