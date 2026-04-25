@@ -150,7 +150,7 @@ class BatchOrchestrator:
             jobs_skipped     = counters["skipped"],
         )
 
-        final_status = JobStatus.FAILED if counters["failed"] > 0 or counters["skipped"] > 0 else JobStatus.COMPLETED
+        final_status = JobStatus.FAILED if counters["failed"] > 0 else JobStatus.COMPLETED
         
         logger.info(
             "=== BATCH END === status=%s  completed=%s  failed=%s  skipped=%s",
@@ -237,7 +237,7 @@ class BatchOrchestrator:
         deps_met, dep_reason = self._audit_mgr.check_dependencies_met(job_row, business_date)
         if not deps_met:
             self._logger.skip_job(audit_log_id, dep_reason)
-            return JobStatus.SKIPPED
+            return JobStatus.FAILED
 
         # -- Run transformation
         try:

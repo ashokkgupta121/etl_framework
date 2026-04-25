@@ -241,10 +241,7 @@ class ETLLogger:
     ) -> None:
         """Updates job_audit_log to COMPLETED with row count metrics."""
         end_time = datetime.utcnow()
-        max_retries = 5
-        for i in range(max_retries):
-            try:
-                self._spark.sql(f"""
+        mergesql = f"""
                     MERGE INTO {MetadataTable.JOB_AUDIT_LOG} AS tgt
                     USING (
                         SELECT
@@ -271,22 +268,8 @@ class ETLLogger:
                                                 tgt.watermark_value_new = src.watermark_value_new,
                                                 tgt.error_desc = src.error_desc,
                                                 tgt.updated_dt = src.updated_dt
-                """)
-                break 
-            except Exception as e:
-                if "ConcurrentAppendException" in str(e) and i < max_retries - 1:
-                    print(f"ConcurrentAppendException in complete_job . Retrying in {2**i}s...")
-                    time.sleep(2 ** i + random.uniform(0, 1))
-                    continue
-                else:
-                    print(f"Final error for {job_audit_log_id}: {e}")
-                    raise e
-            finally:
-            # Clean up temp view after merge completes or fails
-                try:
-                    self._spark.sql(f"DROP VIEW IF EXISTS {job_audit_log_id}")
-                except:
-                    pass
+                """
+        self._execute_with_retries(mergesql)
 
         logger.info("Job COMPLETED — audit_id=%s  inserted=%s  updated=%s",
                     job_audit_log_id, target_rows_inserted, target_rows_updated)
@@ -294,7 +277,7 @@ class ETLLogger:
     def fail_job(self, job_audit_log_id: int, error_desc: str) -> None:
         """Updates job_audit_log to FAILED."""
         safe_err = error_desc.replace("'", "''")[:4000]
-        self._spark.sql(f"""
+        mergesql = f"""
             MERGE INTO {MetadataTable.JOB_AUDIT_LOG} AS tgt
             USING (
                 SELECT
@@ -309,13 +292,14 @@ class ETLLogger:
                 tgt.job_end_date = src.job_end_date,
                 tgt.error_desc   = src.error_desc,
                 tgt.updated_dt   = src.updated_dt
-        """)
+        """
+        self._execute_with_retries(mergesql)
         logger.error("Job FAILED — audit_id=%s", job_audit_log_id)
 
     def skip_job(self, job_audit_log_id: int, skip_reason: str) -> None:
         """Updates job_audit_log to SKIPPED."""
         safe_reason = skip_reason.replace("'", "''")
-        self._spark.sql(f"""
+        mergesql = f"""
             MERGE INTO {MetadataTable.JOB_AUDIT_LOG} AS tgt
             USING (
                 SELECT
@@ -330,7 +314,8 @@ class ETLLogger:
                 tgt.skip_reason  = src.skip_reason,
                 tgt.job_end_date = src.job_end_date,
                 tgt.updated_dt   = src.updated_dt
-        """)
+        """
+        self._execute_with_retries(mergesql)
         logger.info("Job SKIPPED — audit_id=%s  reason=%s", job_audit_log_id, skip_reason)
 
     # =========================================================================
@@ -339,48 +324,30 @@ class ETLLogger:
 
     def _merge_batch_log(self, df, batch_job_log_id: str) -> None:
         df.createOrReplaceTempView("_batch_log_stage")
-        print("before merge")
-        self._spark.sql(f"""
+        
+        mergesql = f"""
             MERGE INTO {MetadataTable.BATCH_JOB_LOG} AS tgt
             USING _batch_log_stage AS src
               ON tgt.batch_job_log_id = src.batch_job_log_id
             WHEN NOT MATCHED THEN INSERT *
-        """)
-        print("after merge")
-
-    def _merge_job_log(self, df, job_audit_log_id: int) -> None:  
+        """
+        self._execute_with_retries(mergesql)
         
 
-        max_retries = 5
-        for i in range(max_retries):
-            print(f"attempt : {i} for merge job log for {job_audit_log_id} ")
-            temp_view_name = f"_job_log_stage_{job_audit_log_id}_{int(time.time() * 1000)}"
-            df.createOrReplaceTempView(temp_view_name)
-            try:
-                # Your MERGE or APPEND logic here
-                self._spark.sql(f"""
-                    MERGE INTO {MetadataTable.JOB_AUDIT_LOG} AS tgt
-                    USING {temp_view_name} AS src
-                    ON tgt.job_audit_log_id = src.job_audit_log_id
-                    WHEN NOT MATCHED THEN INSERT *
-                """)
-                
-                print(f"successfully inserted {job_audit_log_id} ")
-                break 
-            except Exception as e:
-                if "ConcurrentAppendException" in str(e) and i < max_retries - 1:
-                    print(f"ConcurrentAppendException in insert job log. Retrying in {2**i}s...")
-                    time.sleep(2 ** i + random.uniform(0, 1))
-                    continue
-                else:
-                    print(f"Final error for {job_audit_log_id}: {e}")
-                    raise e
-            finally:
-            # Clean up temp view after merge completes or fails
-                try:
-                    self._spark.sql(f"DROP VIEW IF EXISTS {temp_view_name}")
-                except:
-                    pass
+    def _merge_job_log(self, df, job_audit_log_id: int) -> None:  
+
+        temp_view_name = f"_job_log_stage_{job_audit_log_id}_{int(time.time() * 1000)}"
+        if df is not None and temp_view_name is not None:
+                    df.createOrReplaceTempView(temp_view_name)
+
+        merge_sql = f"""
+            MERGE INTO {MetadataTable.JOB_AUDIT_LOG} AS tgt
+            USING {temp_view_name} AS src
+            ON tgt.job_audit_log_id = src.job_audit_log_id
+            WHEN NOT MATCHED THEN INSERT *
+        """
+        self._execute_with_retries(merge_sql)
+        
 
         
 
@@ -396,11 +363,7 @@ class ETLLogger:
         jobs_skipped:     int = 0,
     ) -> None:
         safe_err = (error_message or "").replace("'", "''")
-        max_retries = 5
-        for i in range(max_retries):
-            
-            try:
-                self._spark.sql(f"""
+        mergesql = f"""
                     MERGE INTO {MetadataTable.BATCH_JOB_LOG} AS tgt
                     USING (
                         SELECT
@@ -423,14 +386,25 @@ class ETLLogger:
                         tgt.jobs_skipped   = src.jobs_skipped,
                         tgt.error_message  = src.error_message,
                         tgt.updated_dt     = src.updated_dt
-                """)
-                break 
-            except Exception as e:
-                if "ConcurrentAppendException" in str(e) and i < max_retries - 1:
-                    print(f"ConcurrentAppendException i update batch log. Retrying in {2**i}s...")
-                    time.sleep(2 ** i + random.uniform(0, 1))
-                    continue
-                else:
-                    print(f"Final error for {batch_job_log_id}: {e}")
-                    raise e
+                """
+        self._execute_with_retries(mergesql)
+                 
             
+            
+    def _execute_with_retries(self, merge_sql: str, max_retries: int = 5):
+            for i in range(max_retries):
+                print(f"attempt : {i} for merge operation")
+                
+                try:
+                    self._spark.sql(merge_sql)
+                    print("successfully executed merge operation")
+                    break
+                except Exception as e:
+                    if i < max_retries - 1:
+                        print(f"ConcurrentAppendException in merge operation. Retrying in {2**i}s...")
+                        time.sleep(2 ** i + random.uniform(0, 1))
+                        continue
+                    else:
+                        print(f"Final error: {e}")
+                        raise e
+                
