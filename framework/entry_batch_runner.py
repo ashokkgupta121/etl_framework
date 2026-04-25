@@ -3,6 +3,13 @@
 # [tool.databricks.environment]
 # environment_version = "2"
 # ///
+dbutils.widgets.text("batch_job_config_id", "1")
+dbutils.widgets.text("business_date",        "")
+dbutils.widgets.text("trigger_type",         "SCHEDULED")
+dbutils.widgets.text("airflow_dag_id",        "manual_run")
+
+# COMMAND ----------
+
 # MAGIC %load_ext autoreload
 # MAGIC %autoreload 2
 # MAGIC # Enables autoreload; learn more at https://docs.databricks.com/en/files/workspace-modules.html#autoreload-for-python-modules
@@ -10,6 +17,7 @@
 
 # COMMAND ----------
 
+# DBTITLE 1,Importing Required Libraries
 # =============================================================================
 # FILE    : framework/entry_batch_runner.py
 # PURPOSE : Databricks entry notebook / job script.
@@ -36,12 +44,11 @@ from datetime import date
 
 # -- Make framework modules importable ---------------------------------------
 # In Databricks, the repo is mounted at /Workspace/Repos/<user>/etl_framework
-REPO_ROOT = "/Workspace/Users/ashok.k.gupta121@gmail.com/etl_framework"
+REPO_ROOT = "/Workspace/Users/ashok.g.work121@gmail.com/etl_framework"
 MODULES_PATH = f"{REPO_ROOT}/framework/modules"
 SQL_PATH = f"{REPO_ROOT}/framework/modules/sql/visionplus"
 
 
-# DBTITLE 1,Importing Required Libraries
 import pandas as pd
 import numpy as np
 
@@ -73,7 +80,7 @@ for _mod in ["app_config", "session_manager", "secret_manager",
 
 # -- Configure logging -------------------------------------------------------
 logging.basicConfig(
-    level  = logging.INFO,
+    level  = logging.ERROR,
     format = "%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
 )
 logger = logging.getLogger("etl.entry_batch_runner")

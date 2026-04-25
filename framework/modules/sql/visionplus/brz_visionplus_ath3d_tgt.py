@@ -1,4 +1,3 @@
-# Databricks notebook source
 # =============================================================================
 # FILE    : framework/sql/bronze/visionplus/brz_visionplus_ath3d_tgt.py
 # LAYER   : BRONZE
